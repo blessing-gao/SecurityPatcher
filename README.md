@@ -2,6 +2,8 @@
 
 一键自动修复OpenSSH/OpenSSL安全漏洞的工具，支持多个Linux发行版。
 
+![SecurityPatcher Banner](./images/security-patcher-banner.svg)
+
 ## 项目简介
 
 SecurityPatcher是一个专注于修复服务器关键安全漏洞的开源工具集，当前主要针对OpenSSH和OpenSSL的常见高危漏洞提供一键修复方案。该工具适用于各类Linux服务器，能够自动检测、备份、升级并验证安装结果，为系统管理员提供便捷的安全修复体验。
