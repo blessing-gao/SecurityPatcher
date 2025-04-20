@@ -2,7 +2,7 @@
 
 一键自动修复OpenSSH/OpenSSL安全漏洞的工具，支持多个Linux发行版。
 
-![SecurityPatcher Banner](./images/security-patcher-banner.svg)
+![SecurityPatcher Banner](./doc/security-patcher-banner.svg)
 
 ## 项目简介
 
