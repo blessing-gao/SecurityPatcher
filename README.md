@@ -35,25 +35,25 @@ SecurityPatcher是一个专注于修复服务器关键安全漏洞的开源工�
 
 ```bash
 # 使用默认版本(OpenSSH 9.9p1)
-sudo ./security-patcher.sh
+sudo ./openssl-auto-upgrade.sh
 
 # 指定版本
-sudo ./security-patcher.sh 9.9p1 3.4.1
+sudo ./openssl-auto-upgrade.sh 9.9p1 3.4.1
 ```
 
 ### 命令行参数
 
 ```
-使用方法: ./security-patcher.sh [openssh版本] [openssl版本]
+使用方法: ./openssl-auto-upgrade.sh [openssh版本] [openssl版本]
 
 参数:
   openssh版本    要安装的OpenSSH版本，例如9.9p1
   openssl版本    要安装的OpenSSL版本，例如3.4.1
 
 示例:
-  ./security-patcher.sh 9.9p1 3.4.1    安装OpenSSH 9.9p1和OpenSSL 3.4.1
-  ./security-patcher.sh 9.9p1          只安装OpenSSH 9.9p1
-  ./security-patcher.sh                使用默认版本(OpenSSH 9.9p1)
+  ./openssl-auto-upgrade.sh 9.9p1 3.4.1    安装OpenSSH 9.9p1和OpenSSL 3.4.1
+  ./openssl-auto-upgrade.sh 9.9p1          只安装OpenSSH 9.9p1
+  ./openssl-auto-upgrade.sh                使用默认版本(OpenSSH 9.9p1)
 ```
 
 ## 安装要求
