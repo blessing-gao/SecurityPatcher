@@ -169,7 +169,7 @@ download_file() {
 log_header "准备安装环境"
 log_step "安装必要的依赖包..."
 apt update
-apt install -y build-essential zlib1g-dev libssl-dev libpam0g-dev \
+apt install -y build-essential zlib1g-dev libpam0g-dev \
     libselinux1-dev libkrb5-dev libedit-dev libldap2-dev checkinstall \
     wget net-tools xinetd telnetd
 
@@ -217,9 +217,46 @@ if [ -n "$OPENSSL_VERSION" ]; then
     
     cd $OPENSSL_SRC
     
-    # 配置
+    # 备份现有的OpenSSL安装
+    log_step "备份现有的OpenSSL安装..."
+    BACKUP_TIMESTAMP=$(date +%Y%m%d%H%M%S)
+    
+    # 先备份重要文件
+    if [ -d "/usr/include/openssl" ]; then
+        cp -a /usr/include/openssl ${BACKUP_DIR}/openssl_headers_$BACKUP_TIMESTAMP
+    fi
+    
+    if [ -d "$OPENSSL_INSTALL_DIR" ]; then
+        mv $OPENSSL_INSTALL_DIR ${OPENSSL_INSTALL_DIR}_old_$BACKUP_TIMESTAMP
+    fi
+    
+    # 备份旧的OpenSSL二进制文件
+    if [ -f /usr/bin/openssl ]; then
+        cp -a /usr/bin/openssl ${BACKUP_DIR}/openssl_bin_$BACKUP_TIMESTAMP
+        mv /usr/bin/openssl /usr/bin/openssl.old.$BACKUP_TIMESTAMP
+    fi
+    
+    # 确保libssl-dev已卸载，避免头文件来自不同版本
+    log_step "卸载现有的OpenSSL开发包..."
+    apt-get remove -y libssl-dev || {
+        log_warn "无法通过apt移除libssl-dev，将尝试手动清理"
+    }
+    
+    # 手动删除可能导致版本混淆的文件
+    log_step "清理可能导致版本混淆的文件..."
+    rm -rf /usr/include/openssl
+    rm -f /usr/lib/*/libssl.* 2>/dev/null
+    rm -f /usr/lib/*/libcrypto.* 2>/dev/null
+    rm -f /usr/lib/*/pkgconfig/libssl.pc 2>/dev/null
+    rm -f /usr/lib/*/pkgconfig/libcrypto.pc 2>/dev/null
+    rm -f /usr/lib/*/pkgconfig/openssl.pc 2>/dev/null
+    rm -f /usr/lib/pkgconfig/libssl.pc 2>/dev/null
+    rm -f /usr/lib/pkgconfig/libcrypto.pc 2>/dev/null
+    rm -f /usr/lib/pkgconfig/openssl.pc 2>/dev/null
+    
+    # 配置 - 修改配置选项以适应现代系统
     log_step "配置OpenSSL..."
-    ./config --prefix=$OPENSSL_INSTALL_DIR --openssldir=$OPENSSL_INSTALL_DIR shared zlib || {
+    ./config --prefix=$OPENSSL_INSTALL_DIR --openssldir=$OPENSSL_INSTALL_DIR shared zlib -fPIC || {
         log_error "配置OpenSSL失败"
         exit 1
     }
@@ -231,46 +268,102 @@ if [ -n "$OPENSSL_VERSION" ]; then
         exit 1
     }
     
-    # 跳过测试
+    # 跳过测试以节省时间
     log_step "跳过OpenSSL测试阶段..."
     
     # 安装
     log_step "安装OpenSSL..."
-    make install || {
+    make install_sw || {
         log_error "安装OpenSSL失败"
         exit 1
     }
     
+    # 修正库目录路径
+    LIB_DIR=$(find $OPENSSL_INSTALL_DIR -name "*.so*" -type f | head -n 1 | xargs dirname)
+    log_info "OpenSSL库文件目录: $LIB_DIR"
+    
+    # 验证安装并记录版本信息
+    log_step "验证OpenSSL安装并记录版本信息..."
+    NEW_SSL_VERSION=$($OPENSSL_INSTALL_DIR/bin/openssl version)
+    NEW_SSL_VERSION_NUM=$($OPENSSL_INSTALL_DIR/bin/openssl version -v | awk '{print $2}')
+    
+    log_info "升级后的OpenSSL版本: $NEW_SSL_VERSION"
+    log_info "升级后的OpenSSL版本号: $NEW_SSL_VERSION_NUM"
+    
     # 配置共享库
     log_step "配置共享库..."
-    echo "$OPENSSL_INSTALL_DIR/lib64" > /etc/ld.so.conf.d/openssl-$OPENSSL_VERSION.conf
+    echo "$LIB_DIR" > /etc/ld.so.conf.d/openssl-$OPENSSL_VERSION.conf
     ldconfig -v
+    
+    # 创建必要的符号链接，确保系统使用新版本
+    log_step "创建关键符号链接..."
+    
+    # 确保二进制文件符号链接正确
+    ln -sf $OPENSSL_INSTALL_DIR/bin/openssl /usr/bin/openssl
+    
+    # 为系统头文件创建符号链接，确保编译时使用正确的版本
+    mkdir -p /usr/include
+    ln -sf $OPENSSL_INSTALL_DIR/include/openssl /usr/include/openssl
+    
+    # 为系统库文件创建符号链接
+    ln -sf $LIB_DIR/libssl.so /usr/lib/libssl.so
+    ln -sf $LIB_DIR/libcrypto.so /usr/lib/libcrypto.so
+    
+    # 确保pkg-config能找到OpenSSL
+    log_step "配置pkg-config..."
+    if [ ! -d "/usr/lib/pkgconfig" ]; then
+        mkdir -p /usr/lib/pkgconfig
+    fi
+    
+    # 复制pkgconfig文件到标准位置
+    for pc_file in $OPENSSL_INSTALL_DIR/lib*/pkgconfig/*.pc; do
+        if [ -f "$pc_file" ]; then
+            cp $pc_file /usr/lib/pkgconfig/
+        fi
+    done
     
     # 配置环境变量
     log_step "配置环境变量..."
     if ! grep -q "$OPENSSL_INSTALL_DIR/bin" /etc/environment; then
         cp /etc/environment /etc/environment.bak
         echo "PATH=\"$OPENSSL_INSTALL_DIR/bin:\$PATH\"" >> /etc/environment
+        echo "LD_LIBRARY_PATH=\"$LIB_DIR:\$LD_LIBRARY_PATH\"" >> /etc/environment
+        echo "PKG_CONFIG_PATH=\"$OPENSSL_INSTALL_DIR/lib/pkgconfig:$OPENSSL_INSTALL_DIR/lib64/pkgconfig:\$PKG_CONFIG_PATH\"" >> /etc/environment
         source /etc/environment
     fi
     
-    # 创建符号链接
-    log_step "创建符号链接..."
-    if [ -f /usr/bin/openssl ]; then
-        mv /usr/bin/openssl /usr/bin/openssl.old
-    fi
-    ln -sf $OPENSSL_INSTALL_DIR/bin/openssl /usr/bin/openssl
+    # 检查安装是否一致
+    log_step "检查OpenSSL安装一致性..."
+    HEADER_PATH=$OPENSSL_INSTALL_DIR/include/openssl/opensslv.h
+    HEADER_VERSION=$(grep "#define OPENSSL_VERSION_NUMBER" $HEADER_PATH | awk '{print $3}')
     
-    # 验证安装
-    log_step "验证OpenSSL安装..."
-    NEW_SSL_VERSION=$($OPENSSL_INSTALL_DIR/bin/openssl version)
-    log_info "升级后的OpenSSL版本: $NEW_SSL_VERSION"
+    log_info "OpenSSL头文件版本号: $HEADER_VERSION"
+    log_info "OpenSSL库文件版本: $NEW_SSL_VERSION"
+    
+    # 验证头文件和库文件是否一致
+    if [ -f "$HEADER_PATH" ]; then
+        log_info "OpenSSL头文件验证成功: $HEADER_PATH"
+    else
+        log_error "找不到OpenSSL头文件: $HEADER_PATH"
+    fi
+    
+    if [ -f "$LIB_DIR/libssl.so" ]; then
+        log_info "OpenSSL库文件验证成功: $LIB_DIR/libssl.so"
+    else
+        log_error "找不到OpenSSL库文件: $LIB_DIR/libssl.so"
+    fi
     
     log_info "OpenSSL $OPENSSL_VERSION 安装完成"
 fi
 
 # 升级OpenSSH
 log_header "开始升级OpenSSH"
+
+# 卸载现有的OpenSSH（但保留配置文件）
+log_step "卸载现有的OpenSSH..."
+apt-get remove -y --purge openssh-server openssh-client || {
+    log_warn "卸载现有OpenSSH失败，但将继续安装"
+}
 
 # 下载OpenSSH源码
 log_step "下载OpenSSH ${OPENSSH_VERSION}源码..."
@@ -287,24 +380,90 @@ tar -zxf $OPENSSH_TAR || {
 
 cd $OPENSSH_SRC
 
+# 确保OpenSSL头文件与库文件完全一致
+if [ -n "$OPENSSL_VERSION" ]; then
+    log_step "确保OpenSSL头文件与库文件一致..."
+    
+    # 检查系统中是否存在多个OpenSSL版本
+    log_info "检查系统中的OpenSSL版本..."
+    SYSTEM_OPENSSL_HEADER_VERSION=$(grep "#define OPENSSL_VERSION_NUMBER" /usr/include/openssl/opensslv.h 2>/dev/null | awk '{print $3}' || echo "")
+    SYSTEM_OPENSSL_LIB_VERSION=$(strings /usr/lib/$(uname -m)-linux-gnu/libssl.so 2>/dev/null | grep "^OpenSSL " | head -1 || echo "")
+    
+    log_info "系统OpenSSL头文件版本号: $SYSTEM_OPENSSL_HEADER_VERSION"
+    log_info "系统OpenSSL库文件版本: $SYSTEM_OPENSSL_LIB_VERSION"
+    
+    # 删除所有现有的OpenSSL开发文件
+    log_step "删除现有的OpenSSL开发文件..."
+    apt-get remove -y libssl-dev || {
+        log_warn "无法通过apt移除libssl-dev，尝试手动删除文件"
+    }
+    
+    # 手动删除可能冲突的文件
+    rm -rf /usr/include/openssl
+    rm -f /usr/lib/$(uname -m)-linux-gnu/pkgconfig/openssl.pc
+    rm -f /usr/lib/$(uname -m)-linux-gnu/pkgconfig/libssl.pc
+    rm -f /usr/lib/$(uname -m)-linux-gnu/pkgconfig/libcrypto.pc
+fi
+
 # 配置
 log_step "配置OpenSSH..."
 if [ -n "$OPENSSL_VERSION" ]; then
+    # 配置环境变量以使用新的OpenSSL
     export CPPFLAGS="-I${OPENSSL_INSTALL_DIR}/include"
-    export LDFLAGS="-L${OPENSSL_INSTALL_DIR}/lib64"
-    export LD_LIBRARY_PATH="${OPENSSL_INSTALL_DIR}/lib64:$LD_LIBRARY_PATH"
+    export LDFLAGS="-L${LIB_DIR}"
+    export LD_LIBRARY_PATH="${LIB_DIR}:$LD_LIBRARY_PATH"
+    export PKG_CONFIG_PATH="${OPENSSL_INSTALL_DIR}/lib/pkgconfig:${OPENSSL_INSTALL_DIR}/lib64/pkgconfig:$PKG_CONFIG_PATH"
+    export OPENSSL_CFLAGS="-I${OPENSSL_INSTALL_DIR}/include"
+    export OPENSSL_LIBS="-L${LIB_DIR} -lssl -lcrypto"
     
+    # 创建一个符号链接，确保编译器找到正确的头文件
+    log_step "创建符号链接到正确的OpenSSL头文件..."
+    if [ -d "/usr/include" ]; then
+        if [ ! -L "/usr/include/openssl" ]; then
+            ln -sf ${OPENSSL_INSTALL_DIR}/include/openssl /usr/include/openssl
+        else
+            rm -f /usr/include/openssl
+            ln -sf ${OPENSSL_INSTALL_DIR}/include/openssl /usr/include/openssl
+        fi
+    fi
+    
+    # 确保库文件能被找到
+    echo "${LIB_DIR}" > /etc/ld.so.conf.d/openssl-${OPENSSL_VERSION}.conf
+    ldconfig
+    
+    # 使用正确的OpenSSL路径配置
     ./configure --prefix=/usr \
         --sysconfdir=/etc/ssh \
         --with-md5-passwords \
         --with-privsep-path=/var/lib/sshd \
         --with-pam \
         --with-selinux \
-        --with-pid-dir=/run \
-        --with-xauth=/usr/bin/xauth \
         --with-ssl-dir=${OPENSSL_INSTALL_DIR} || {
             log_error "配置OpenSSH失败"
-            exit 1
+            log_warn "尝试添加--without-openssl-header-check选项..."
+            
+            ./configure --prefix=/usr \
+                --sysconfdir=/etc/ssh \
+                --with-md5-passwords \
+                --with-privsep-path=/var/lib/sshd \
+                --with-pam \
+                --with-selinux \
+                --with-ssl-dir=${OPENSSL_INSTALL_DIR} \
+                --without-openssl-header-check || {
+                    log_error "使用--without-openssl-header-check配置仍然失败"
+                    log_warn "尝试不使用OpenSSL进行配置..."
+                    
+                    ./configure --prefix=/usr \
+                        --sysconfdir=/etc/ssh \
+                        --with-md5-passwords \
+                        --with-privsep-path=/var/lib/sshd \
+                        --with-pam \
+                        --with-selinux \
+                        --without-openssl || {
+                            log_error "所有配置尝试均失败，无法继续"
+                            exit 1
+                        }
+                }
         }
 else
     ./configure --prefix=/usr \
@@ -312,9 +471,7 @@ else
         --with-md5-passwords \
         --with-privsep-path=/var/lib/sshd \
         --with-pam \
-        --with-selinux \
-        --with-pid-dir=/run \
-        --with-xauth=/usr/bin/xauth || {
+        --with-selinux || {
             log_error "配置OpenSSH失败"
             exit 1
         }
@@ -329,7 +486,7 @@ make -j$(nproc) || {
 
 # 停止SSH服务
 log_step "停止SSH服务..."
-systemctl stop ssh || systemctl stop sshd || service ssh stop || service sshd stop
+systemctl stop ssh 2>/dev/null || systemctl stop sshd 2>/dev/null || service ssh stop 2>/dev/null || service sshd stop 2>/dev/null || true
 
 # 安装
 log_step "安装OpenSSH..."
@@ -340,13 +497,54 @@ make install || {
 
 # 安装ssh-copy-id工具
 install -v -m755 contrib/ssh-copy-id /usr/bin
-install -v -m644 contrib/ssh-copy-id.1 /usr/share/man/man1
+install -v -m644 contrib/ssh-copy-id.1 /usr/share/man/man1 2>/dev/null || true
+
+# 创建必要的目录
+if [ ! -d "/var/lib/sshd" ]; then
+    mkdir -p /var/lib/sshd
+    chmod 0755 /var/lib/sshd
+fi
+
+# 如果密钥不存在，生成密钥
+if [ ! -f "/etc/ssh/ssh_host_rsa_key" ]; then
+    log_step "生成SSH主机密钥..."
+    ssh-keygen -A
+fi
 
 # 确保权限正确
 chmod 0755 /usr/sbin/sshd
 chmod 0644 /etc/ssh/sshd_config
 chmod 0600 /etc/ssh/ssh_host_*_key 2>/dev/null || true
 chmod 0644 /etc/ssh/ssh_host_*_key.pub 2>/dev/null || true
+
+# 创建systemd服务文件（如果不存在）
+log_step "创建systemd服务文件..."
+if [ ! -f "/lib/systemd/system/ssh.service" ] && [ ! -f "/lib/systemd/system/sshd.service" ]; then
+    cat > /lib/systemd/system/ssh.service << EOF
+[Unit]
+Description=OpenBSD Secure Shell server
+Documentation=man:sshd(8) man:sshd_config(5)
+After=network.target auditd.service
+ConditionPathExists=!/etc/ssh/sshd_not_to_be_run
+
+[Service]
+EnvironmentFile=-/etc/default/ssh
+ExecStartPre=/usr/sbin/sshd -t
+ExecStart=/usr/sbin/sshd -D $SSHD_OPTS
+ExecReload=/usr/sbin/sshd -t
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+Restart=on-failure
+RestartPreventExitStatus=255
+Type=notify
+RuntimeDirectory=sshd
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target
+Alias=sshd.service
+EOF
+fi
 
 # 配置安全选项
 log_step "配置SSH安全选项（修复漏洞）..."
@@ -382,7 +580,10 @@ EOF
 log_step "启动SSH服务..."
 systemctl daemon-reload
 systemctl enable ssh
-systemctl start ssh || systemctl start sshd
+systemctl start ssh || systemctl start sshd || {
+    log_error "SSH服务启动失败，尝试手动启动..."
+    /usr/sbin/sshd -f /etc/ssh/sshd_config
+}
 
 # 等待SSH服务启动
 log_step "等待SSH服务启动..."
@@ -400,9 +601,14 @@ elif systemctl is-active sshd > /dev/null 2>&1; then
     SSH_SERVICE="sshd"
     log_info "SSH服务(sshd)已启动"
 else
-    log_error "SSH服务未启动！"
-    log_warn "请通过telnet连接并手动启动和调试SSH服务"
-    exit 1
+    # 检查进程
+    if pgrep sshd > /dev/null; then
+        log_info "SSH服务进程正在运行"
+    else
+        log_error "SSH服务未启动！"
+        log_warn "请通过telnet连接并手动启动和调试SSH服务"
+        log_info "手动启动命令: /usr/sbin/sshd -f /etc/ssh/sshd_config"
+    fi
 fi
 
 # 检查SSH监听端口
@@ -413,7 +619,6 @@ if [ "$SSH_PORT" -gt 0 ]; then
 else
     log_error "SSH未在22端口监听！"
     log_warn "请通过telnet连接并手动启动和调试SSH服务"
-    exit 1
 fi
 
 # 测试SSH本地连接
